@@ -38,7 +38,7 @@ The usage is similar to `make`, in that the entire program input is taken from a
 }
 ```
 
-By simply calling the program `smake` the database gets assembled according to the listed scripts. The `strict` attribute determines whether foreign keys should be enabled for this build, whereas `replacing` specifies whether an existing database under the same path should be deleted beforehand.
+By simply calling the program `smake` the database gets assembled according to the listed scripts.
 
 ### Build Configuration
 
@@ -47,10 +47,6 @@ By simply calling the program `smake` the database gets assembled according to t
 | `replacing` | Boolean | If `true`, deletes existing database before creation. |
 | `strict`   | Boolean | Enables SQLite foreign key constraints. |
 | `scripts`  | List    | List of SQL script files to execute. |
-
-## SQL Parsing & Execution
-
-SMake includes a custom SQL parser to separate multiple statements and capture line numbers for better error reporting.
 
 ### Initialize Project
 
@@ -68,10 +64,11 @@ As a small special feature, SMake provides feedback on all executed instructions
     <img src="docs/feedback.png" alt="Example feedback output from SMake." width="600">
 </div>
 
-SMake provides color-coded warnings and errors for better debugging.
+Furthermore, there are colored warnings and errors with line numbers for better debugging:
 
-- **Warnings**: Displayed when unknown keys are found in `smake.json`.
-- **Errors**: Highlight SQL execution failures with precise line numbers.
+<div align="center">
+    <img src="docs/errors.png" alt="Example feedback output from SMake." width="600">
+</div>
 
 ## License
 
