@@ -72,7 +72,7 @@ SELECT * FROM Orders;
 """
 
 
-class TestCalculations(unittest.TestCase):
+class TestSMake(unittest.TestCase):
 
 	def test_sql_parser(self):
 		statements = smake.parse_sql(_sql_script)
