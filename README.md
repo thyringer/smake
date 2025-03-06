@@ -23,7 +23,6 @@ SQLite is obtained directly from the Python Standard Library, so there are no th
    if this search path for executable scripts is not yet known.
 3. Make the script file executable with `chmod +x smake`.
 
-
 ## Usage
 
 The usage is similar to `make`, in that the entire program input is taken from a local file – more precisely a JSON file:
