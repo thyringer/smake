@@ -4,7 +4,7 @@ SMake is a command-line tool designed to create SQLite databases from multiple S
 
 ## Outline of Functionalities
 
-Configurations (builds) for any number of SQLite databases are defined by a JSON file. SMake then executes the listed SQL scripts in sequence with the specified options such as enabling foreign key constraints, or whether to replace an existing/previously built database. If errors occur, at least the numbers of the first and last line of the relevant statement are displayed.
+Configurations (builds) for any number of SQLite databases are defined by a JSON file. SMake then executes the listed SQL scripts in sequence with the specified options such as enabling foreign key constraints, or whether to replace an existing/previously built database. If an error occurs, at least the numbers of the first and last line of the relevant statement are displayed.
 
 ## Installation
 

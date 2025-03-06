@@ -257,7 +257,7 @@ def bold(text: str) -> str:
 	return f"\033[1m{text}\033[0m"
 
 
-_error_bar = "\033[91m│\033[0m" 
+_error_bar = "  \033[91m│\033[0m " 
 
 
 def print_warning(script_path: str):
@@ -286,7 +286,7 @@ def execute_sql(db_path: str, script_path: str, strict: bool = True):
 					if statement.feedback:
 						print(f"    {statement.feedback}")
 				except sqlite3.Error as e:
-					print(f"  {_error_bar} \033[91m[ERROR]\033[0m when executing {bold(script_path)}:{statement.line_from}:{statement.line_to}\n  {_error_bar} {e}")
+					print(f"{_error_bar}\033[91m[ERROR]\033[0m when executing {bold(script_path)}:{statement.line_from}:{statement.line_to}\n{_error_bar}{e}")
 
 	except FileNotFoundError:
 		print_warning(script_path)
@@ -295,24 +295,23 @@ def execute_sql(db_path: str, script_path: str, strict: bool = True):
 
 
 def create_db():
-	# Load project configuration:
-	builds = Build.read()
+	config = Build.read()
+		# The term "configuration" here refers to the totality of all builds described.
 
-	for db_path, config in builds.items():
-		print("╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌")
+	for db_path, build in config.items():
+		print()
 		
 		db_dir = os.path.dirname(db_path)
 		if not os.path.exists(db_dir):
 			os.makedirs(db_dir)
-
-		if config.replacing:
+		elif build.replacing:
 			print(f"\033[91mRemove existing database ./{db_path}\033[0m")
 			db_path.unlink(missing_ok=True)
 
-		for script_path in config.scripts:
+		for script_path in build.scripts:
 			if script_path.exists():
 				print(f"Execute {bold(script_path)} on database {bold(db_path)}")
-				execute_sql(db_path, script_path, config.strict)
+				execute_sql(db_path, script_path, build.strict)
 			else:
 				print_warning(script_path)
 
@@ -348,35 +347,4 @@ if __name__ == "__main__":
 		init_project()
 	else:
 		parser.print_help()
-
-
-# 	sql_script = """
-# 	-- This is a comment
-# 	CREATE TABLE users (
-# 		id INTEGER PRIMARY KEY,
-# 		name TEXT
-# 	);
-
-# 	begin transaction;
-
-# 	create trigger validate_inserted_creation before insert on post for each row
-# 		when new.creation < "2020-01-01 00:00:00" or new.creation > datetime("now")
-# 	begin
-# 		select raise(abort, "Whatever!");
-# 		insert …;
-# 		update …;
-# 		delete …;
-# end; INSERT INTO users (name) VALUES ("Alice");
-# 	INSERT INTO users (name) VALUES ("Bob");
-
-# 	-- This statement doesn"t end with a semicolon
-# 	SELECT * FROM users
-# 	"""
-
-# 	statements = parse_sql(sql_script)
-
-# 	for stmt in statements:
-# 		print(f"Lines {stmt.line_from}-{stmt.line_to}: {stmt.code}")
-
-# 	for stmt in statements:
-# 		print(extract_beginning(stmt.code))
+		
