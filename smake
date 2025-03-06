@@ -1,0 +1,382 @@
+#!/usr/bin/env python
+
+# This is free and unencumbered software released into the public domain.
+
+# Anyone is free to copy, modify, publish, use, compile, sell, or
+# distribute this software, either in source code form or as a compiled
+# binary, for any purpose, commercial or non-commercial, and by any
+# means.
+
+# In jurisdictions that recognize copyright laws, the author or authors
+# of this software dedicate any and all copyright interest in the
+# software to the public domain. We make this dedication for the benefit
+# of the public at large and to the detriment of our heirs and
+# successors. We intend this dedication to be an overt act of
+# relinquishment in perpetuity of all present and future rights to this
+# software under copyright law.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+# OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+# ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+
+# For more information, please refer to <http://unlicense.org/
+
+# Author: Enrico Rippin <e@rippin.org> 2025
+# Last update: 2025-03-05
+# Version: 1.0
+# Brief description: CLI program to create one or more SQLite databases from multiple local source files.
+
+import argparse
+import json
+import os
+import re
+import sqlite3
+import sys
+
+from collections import namedtuple
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from pathlib import Path
+from types import SimpleNamespace
+
+
+# 1 TEMPLATES
+
+_build_file = "smake.json"
+
+_build_example = f"""{{
+	"out/example.db": {{
+		"replacing": true,
+		"strict": true,
+		"scripts": ["example.sql"]
+	}}
+}}
+"""
+
+_example_file = "example.sql"
+
+_example_sql = f"""
+CREATE TABLE example (
+	id INTEGER PRIMARY KEY,
+	name TEXT NOT NULL,
+	age INTEGER
+);
+
+INSERT INTO example (name, age) VALUES ("Otto", 15);
+INSERT INTO example (name, age) VALUES ("Heinrich", 25);
+INSERT INTO example (name, age) VALUES ("Bernhard", 35);
+"""
+
+
+# 2 READING AND PREPARING BUILD DATA
+
+@dataclass
+class Build:
+	scripts: list[Path] = field(default_factory=list)
+	replacing: bool = True
+	strict: bool = True
+
+
+	def __post_init__(self):
+		"""Ensure scripts are converted from str to Path."""
+		self.scripts = [Path(script) if isinstance(script, str) else script for script in self.scripts]
+
+
+	@staticmethod
+	def read() -> dict[Path, 'Build']:
+		"""Load and validate the local configuration, falling back to default values."""
+		if not os.path.exists(_build_file):
+			print(f"\033[91m[ERROR]\033[0m Build file {_build_file} not found. Exiting program...")
+			sys.exit(1)
+
+		with open(_build_file, "r") as f:
+			try:
+				build_data = json.load(f)
+			except json.JSONDecodeError:
+				print(f"\033[91m[ERROR]\033[0m '{_build_file}' is not a valid JSON file. Exiting program...")
+				sys.exit(1)
+
+		builds = {}
+		for db_path, config in build_data.items():
+			filtered_config = {key: value for key, value in config.items() if key in Build.__dataclass_fields__}
+
+			if len(filtered_config) != len(config):
+				unknown_keys = [key for key in config if key not in Build.__dataclass_fields__]
+				print(f"\033[93m[WARNING]\033[0m Unknown keys found in configuration for {bold(db_path)}: {', '.join(unknown_keys)}")
+
+			# Create Build object using the filtered config
+			builds[Path(db_path)] = Build(**filtered_config)
+
+		return builds
+
+
+# 3 SQL PARSING
+
+def extract_beginning(sql_statement: str) -> str:
+	"""Extracts the beginning part of a SQL statement such as the command (CREATE, INSERT INTO, etc.) along with any optional clauses like 'IF NOT EXISTS' and the table name or target."""
+
+	pattern = r"""
+		^(
+			--\s+.*$                                  # For single-line comments
+			|CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+\w+ # CREATE TABLE IF NOT EXISTS <name>
+			|CREATE\s+TABLE\s+\w+                     # CREATE TABLE <name>
+			|CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+\w+ # CREATE INDEX IF NOT EXISTS <name>
+			|CREATE\s+INDEX\s+\w+                     # CREATE INDEX <name>
+			|CREATE\s+TRIGGER\s+\w+                   # CREATE TRIGGER <name>
+			|DROP\s+TABLE\s+\w+                       # DROP TABLE <name>
+			|DROP\s+INDEX\s+\w+                       # DROP INDEX <name>
+			|INSERT\s+INTO\s+\w+                      # INSERT INTO <table_name>
+			|UPDATE\s+\w+                             # UPDATE <table_name>
+			|DELETE\s+FROM\s+\w+                      # DELETE FROM <table_name>
+			|ALTER\s+TABLE\s+\w+                      # ALTER TABLE <table_name>
+			|SELECT\s+.*                              # SELECT statement (includes all variants)
+			|PRAGMA\s+\w+                             # PRAGMA <command>
+			|BEGIN\s+TRANSACTION                      # BEGIN TRANSACTION
+			|COMMIT                                   # COMMIT
+			|ROLLBACK                                 # ROLLBACK
+			|EXPLAIN\s+.*                             # EXPLAIN <statement>
+		)
+	"""
+
+	match = re.match(pattern, sql_statement.strip(), re.IGNORECASE | re.VERBOSE)
+
+	return match.group(0).lower() if match else None
+
+
+Statement = namedtuple("Statement", ["line_from", "line_to", "code", "feedback"])
+
+
+class Context(Enum):
+	Blank = 0
+	Statement = 1
+	Substatement = 2
+
+
+class Subcontext:
+	BlockComment = -1
+	Code = 0
+	SingleQuotedString = 1
+	DoubleQuotedString = 2
+
+
+def parse_sql(sql_script: str) -> list[Statement]:
+	"""Handwritten minimal parser limited to SQLite to separate multiple statements from each other while capturing line numbers for more meaningful error messages.
+	
+	The only restriction is that there must be no spaces or line breaks between `end` and `;`."""
+
+	statements = []
+		# Array with tuples of three elements: starting line number, ending line number and statement.
+	starting_index = 0
+		# String index from which the current statement starts.
+	index = 0
+		# Current index.
+	starting_line = 0
+	line = 0
+		# Current line number.
+	script_length = len(sql_script)
+	context = Context.Blank
+	subcontext: Subcontext = Subcontext.Code
+		# Since block comments and strings can be anywhere, but also to keep the parser simple, these states are handled in parallel to the actual context.
+
+
+	def is_whitespace(char: str) -> bool:
+		return char in (" ", "\t", "\n")
+
+
+	while index < script_length:
+		char = sql_script[index]
+
+		if char == "\n":
+			line += 1
+		elif subcontext is Subcontext.BlockComment:
+			if char == "*" and index + 1 < script_length and sql_script[index + 1] == "/":
+				subcontext = Subcontext.Code
+				index += 1
+		elif subcontext is Subcontext.SingleQuotedString:
+			if char == "'":
+				subcontext = Subcontext.Code
+		elif subcontext is Subcontext.DoubleQuotedString:
+			if char == "\"":
+				subcontext = Subcontext.Code
+		else:
+			match char:
+				case "-":
+					if index + 1 < script_length and sql_script[index + 1] == "-":
+						next_newline = sql_script.find("\n", index)
+							# Skip until the next newline.
+						if next_newline == -1:
+							index = script_lengthn
+								# If no newline is found, go to the end of the script.
+						else:
+							index = next_newline
+							line += 1
+							if context is Context.Blank:
+								starting_index = index
+								starting_line = line
+									# Remove unnecessary line comments before starting a new statement.
+				case "/":
+					if index + 1 < script_length and sql_script[index + 1] == "*":
+						subcontext = Subcontext.BlockComment
+						index += 1
+				case "'":
+					subcontext = Subcontext.SingleQuotedString
+				case "\"":
+					subcontext = Subcontext.DoubleQuotedString
+				case ";":
+					if context is Context.Statement or \
+							context is Context.Substatement and sql_script[index - 3 : index].lower() == "end":
+						stmt = sql_script[starting_index : index + 1]
+						statements.append(
+							Statement(starting_line + 1, line + 1, stmt, extract_beginning(stmt)))
+						starting_index = index + 1
+						starting_line = line + 1
+						context = Context.Blank
+				case _:
+					if context is Context.Blank and char not in (" ", "\t"):
+						context = Context.Statement
+						starting_index = index
+						starting_line = line
+					elif char in {"B", "b"} and \
+							(index == 0 or index > 0 and is_whitespace(sql_script[index - 1])) and \
+								bool(re.match(r"begin\s+(?!transaction)", sql_script[index:], re.IGNORECASE)):
+						context = Context.Substatement
+						index += 4
+
+		index += 1
+	
+	return statements
+
+
+# 4 HELPER FUNCTIONS FOR THE CLI
+
+def bold(text: str) -> str:
+	return f"\033[1m{text}\033[0m"
+
+
+_error_bar = "\033[91m│\033[0m" 
+
+
+def print_warning(script_path: str):
+	print(f"\033[93m[WARNING]\033[0m SQL script {bold(script_path)} not found.")
+
+
+# 5 BASIC FUNCTIONS AND CLI
+
+def execute_sql(db_path: str, script_path: str, strict: bool = True):
+	"""Executes an SQL script on a given SQLite database."""
+	try:
+		with open(script_path, "r") as file:
+			sql_statements = parse_sql(file.read())
+
+		with sqlite3.connect(db_path) as conn:
+			cursor = conn.cursor()
+
+			if strict:
+				cursor.execute("PRAGMA foreign_keys = ON;")
+				conn.commit()
+
+			for statement in sql_statements:				
+				try:
+					cursor.execute(statement.code)
+					conn.commit()
+					if statement.feedback:
+						print(f"    {statement.feedback}")
+				except sqlite3.Error as e:
+					print(f"  {_error_bar} \033[91m[ERROR]\033[0m when executing {bold(script_path)}:{statement.line_from}:{statement.line_to}\n  {_error_bar} {e}")
+
+	except FileNotFoundError:
+		print_warning(script_path)
+	except Exception as e:
+		print(f"\033[91m[ERROR]\033[0m {e}")
+
+
+def create_db():
+	# Load project configuration:
+	builds = Build.read()
+
+	for db_path, config in builds.items():
+		print("╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌")
+		
+		db_dir = os.path.dirname(db_path)
+		if not os.path.exists(db_dir):
+			os.makedirs(db_dir)
+
+		if config.replacing:
+			print(f"\033[91mRemove existing database ./{db_path}\033[0m")
+			db_path.unlink(missing_ok=True)
+
+		for script_path in config.scripts:
+			if script_path.exists():
+				print(f"Execute {bold(script_path)} on database {bold(db_path)}")
+				execute_sql(db_path, script_path, config.strict)
+			else:
+				print_warning(script_path)
+
+
+def init_project():
+	"""Creates a sample build file and SQL script from templates."""
+	if os.path.exists(_build_file):
+		print(f"Build file '{_build_file}' already exists")
+	else:
+		with open(_build_file, "w") as f:
+			f.write(_build_example)
+
+	if os.path.exists(_example_file):
+		print(f"Example file '{_example_file}' already exists")
+	else:
+		with open(_example_file, "w") as f:
+			f.write(_example_sql)
+
+
+if __name__ == "__main__":
+	parser = argparse.ArgumentParser(
+		prog="SMake",
+		description="Build tool to create SQLite databases from multiple files."
+	)
+	subparsers = parser.add_subparsers(dest="subcommand", help="Subcommands")
+	subparsers.add_parser("init", help=f"Create example configuration file.")
+
+	args = parser.parse_args()
+
+	if not args.subcommand:
+		create_db()
+	elif args.subcommand == "init":
+		init_project()
+	else:
+		parser.print_help()
+
+
+# 	sql_script = """
+# 	-- This is a comment
+# 	CREATE TABLE users (
+# 		id INTEGER PRIMARY KEY,
+# 		name TEXT
+# 	);
+
+# 	begin transaction;
+
+# 	create trigger validate_inserted_creation before insert on post for each row
+# 		when new.creation < "2020-01-01 00:00:00" or new.creation > datetime("now")
+# 	begin
+# 		select raise(abort, "Whatever!");
+# 		insert …;
+# 		update …;
+# 		delete …;
+# end; INSERT INTO users (name) VALUES ("Alice");
+# 	INSERT INTO users (name) VALUES ("Bob");
+
+# 	-- This statement doesn"t end with a semicolon
+# 	SELECT * FROM users
+# 	"""
+
+# 	statements = parse_sql(sql_script)
+
+# 	for stmt in statements:
+# 		print(f"Lines {stmt.line_from}-{stmt.line_to}: {stmt.code}")
+
+# 	for stmt in statements:
+# 		print(extract_beginning(stmt.code))
