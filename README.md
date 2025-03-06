@@ -1,154 +1,78 @@
-# Cast 1.0
+# SMake
 
-Cast is a CLI tool for reading strings or complex data sets from CSV files to output them in other text formats.
-
-Cast can also be used as a CLI interface for xxHash to generate hash values.
+SMake is a command-line tool designed to create SQLite databases from multiple SQL source files.
 
 ## Outline of Functionalities
 
-This Python script is a command line tool for generating SQL commands or other output with automatically hashed values using an algorithm of the xxHash family. The data to be processed is entered through the console or by reading in a text file. Furthermore, the printed results can be precisely formatted using templates.
+Configurations (builds) for any number of SQLite databases are defined by a JSON file. SMake then executes the listed SQL scripts in sequence with the specified options such as enabling foreign key constraints, or whether to replace an existing/previously built database. If errors occur, at least the numbers of the first and last line of the relevant statement are displayed.
 
-When reading CSV files, the column names are available as placeholders within the template, which allows the data records to be automatically converted into a suitable SQL insert command, for instance. In fact, any use case that requires automatic conversion to another text file format is conceivable.
+## Installation
 
-## CLI Setup
+SMake is a standalone Python script and does not require installation. Make sure you have at least Python 3.10 or higher on your system.
 
-1. Install Python interpreter (at least version 3.9).
-2. Satisfy dependency with `pip install xxhash`.
+SQLite is obtained directly from the Python Standard Library, so there are no third-party dependencies.
 
 ### Linux
 
-1. Place program file `cast` (without Python extension `py`) under `~/local/bin` (Linux).
+1. Place program file `smake` (without Python extension `py`) under `~/local/bin` (Linux).
 
 2. In the hidden file `.bashrc` located in the user's home directory, write the following line of code,
 
    `export PATH=$HOME/.local/bin:$PATH`
 
    if this search path for executable scripts is not yet known.
-3. Make the script file executable with `chmod +x cast`.
+3. Make the script file executable with `chmod +x smake`.
+
 
 ## Usage
 
-```bash
-python cast <mode> <strings> [<options>]
-```
-Or if stored in the local or system-wide bin folder as `xxh`:
+The usage is similar to `make`, in that the entire program input is taken from a local file – more precisely a JSON file:
 
-```bash
-cast [<mode>] <strings> [<options>]
-```
-
-The first parameter specifies the algorithm, with the following options available:
-
-- `   32` → `xxh32` 
-- `   64` → `xxh64`
-- ` 3_64` → `xxh3_64` 
-- `3_128` → `xxh3_128`
-- ` uuid` → hexadecimal digest of  `xxh3_128` formated as a UUID
-
-In addition, each algorithm has a variant for a hexadecimal number `32x` and an unsigned integer `s32` as a result (which can be particularly useful in the context of PostgreSQL, since there are only signed integers available).
-
-By default, `64` is assumed.
-
-### Options
-
--  `--read` / `-r`
-
-  Load file, where each line is treated as a string to be hashed. If a CSV file is present, the hash value is calculated from all columns separated by commas, unless `--input` is used to specify exactly which columns should be hashed and how. For this reason, the program assumes that CSV files have a table header.
-
-- `--write` / `-w`
-
-  Specify the file in which the results should be written instead of outputting them to the console. If the specified file does not yet exist, it will be created automatically.
-
-- `--input` / `-i`
-
-  Template with the placeholder `{string}`, which specifies how strings are to be hashed. When a CSV file is read in, individual column values can also be addressed using their column names as placeholders.
-
-- `--output` / `-o`
-
-  Template to specify exactly how records are to be output, with the possible placeholders `{string}`, `{input}`, `{hash}`, but also all column names of a read CSV file, where spaces between words are to be replaced by underscores. By default, `"{input}" => {hash}` is used as a template; for CSV files, however, an additional column for the generated hash values is added at the beginning.
-
-- `--template` / `-t`
-
-  The overall output can be defined using another template, where the placeholder `{records}` stands for all records.
-
-- `--spacing` / `-s`
-
-  This allows additional characters to be inserted between the individual records, by default a simple line break `"\n"`.
-
-**Important Note**
-
-In order for Bash to interpret line breaks as in `";\n"`, such strings must be written as `$';\n'`.
-
-## Examples
-
-Input with Default Settings:
-
-```bash
-cast 64 "Hello, world!" "This is a test string."
+```json
+{
+    "out/example.db": {
+        "replacing": true,
+        "strict": true,
+        "scripts": ["example.sql"]
+    }
+}
 ```
 
-Output in Custom Format:
+By simply calling the program `smake` the database gets assembled according to the listed scripts. The `strict` attribute determines whether foreign keys should be enabled for this build, whereas `replacing` specifies whether an existing database under the same path should be deleted beforehand.
 
-```bash
-cast 64 "Hello, world!" "This is a test." -o "'{input}': {hash}"
+### Build Configuration
+
+| Field      | Type     | Description |
+|------------|---------|-------------|
+| `replacing` | Boolean | If `true`, deletes existing database before creation. |
+| `strict`   | Boolean | Enables SQLite foreign key constraints. |
+| `scripts`  | List    | List of SQL script files to execute. |
+
+## SQL Parsing & Execution
+
+SMake includes a custom SQL parser to separate multiple statements and capture line numbers for better error reporting.
+
+### Initialize Project
+
+To create a sample configuration file (`smake.json`) and an example SQL script (`example.sql`), run:
+
+```sh
+./smake init
 ```
 
-**Generate an SQL insert command with records from a CSV data**
+## Feedback and Error Handling
 
-By specifying a template, an insert command can be generated:
+As a small special feature, SMake provides feedback on all executed instructions:
 
-```bash
-cast 32s \
-	-r capitals.csv \
-	-w capitals.sql \
-	-i "{country_code},{capital_city}" \
-	-o "({hash}, '{country_code}', '{capital_city}')" \
-	-t $'insert into City\n\t(hash, country, capital)\nvalues\n\t{records};\n' \
-	-s $'\n\t' \
-```
+<div align="center">
+    <img src="docs/feedback.png" alt="Example feedback output from SMake." width="600">
+</div>
 
-And with this CSV file as dataset,
+SMake provides color-coded warnings and errors for better debugging.
 
-```csv
-capital city, country code, country
-Washington D.C., US, United States
-Ottawa, CA, Canada
-Berlin, DE, Germany
-Tokyo, JP, Japan
-Canberra, AU, Australia
-Paris, FR, France
-Brasília, BR, Brazil
-Moscow, RU, Russia
-Beijing, CN, China
-New Delhi, IN, India
-```
-
-the following output is generated:
-
-```sql
-insert into City
-	(hash, country, capital)
-values
-	(1507852509, 'US', 'Washington D.C.')
-	(2050315825, 'CA', 'Ottawa')
-	(-1405512320, 'DE', 'Berlin')
-	(1261058448, 'JP', 'Tokyo')
-	(1366882969, 'AU', 'Canberra')
-	(-1994286539, 'FR', 'Paris')
-	(1797318940, 'BR', 'Brasília')
-	(2116051181, 'RU', 'Moscow')
-	(-711255517, 'CN', 'Beijing')
-	(1246361623, 'IN', 'New Delhi');
-```
-
-## Dependencies
-
-A Python interpreter version 3.9 or higher is expected. Furthermore, the following dependency must be installed using pip:
-
-```bash
-pip install xxhash
-```
+- **Warnings**: Displayed when unknown keys are found in `smake.json`.
+- **Errors**: Highlight SQL execution failures with precise line numbers.
 
 ## License
 
-Source code is public domain.
+This software is released into the public domain under [The Unlicense](http://unlicense.org/).
